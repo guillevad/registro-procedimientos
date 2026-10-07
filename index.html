@@ -219,6 +219,12 @@ img{max-width:100%}
 (function(){
 'use strict';
 
+/* ===== CONFIGURACIÓN DEL ENVÍO =====
+   Pegar acá la URL de la aplicación web de Google Apps Script (termina en /exec).
+   Si ENDPOINT queda vacío, el formulario funciona en modo maqueta y no envía nada. */
+var ENDPOINT='https://script.google.com/macros/s/AKfycbygQlWMblagK1bNzlGOZSRZ7TOq7zdMqjVjh5hZQamW3zqcFBNMdHBHGXsOE1CFXore/exec';
+var TOKEN='caci-2025-x7k2'; /* debe ser igual a CONFIG.TOKEN en Code.gs */
+
 var PROV=['Buenos Aires','Ciudad Autónoma de Buenos Aires','Catamarca','Chaco','Chubut','Córdoba','Corrientes','Entre Ríos','Formosa','Jujuy','La Pampa','La Rioja','Mendoza','Misiones','Neuquén','Río Negro','Salta','San Juan','San Luis','Santa Cruz','Santa Fe','Santiago del Estero','Tierra del Fuego','Tucumán'];
 var ROLES=['Médico/a de planta','Médico/a residente o becario/a','Técnico/a','Enfermero/a','Otro'];
 
@@ -312,7 +318,7 @@ var XICON='<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><p
 
 var KEY='registro-procedimientos-2025-maqueta-v1';
 function blank(){return {step:0,info:{},v:{},o:{},staff:[{n:'',r:ROLES[0]}]};}
-var S=blank(), storageOK=true, savedAt=null, submitted=false, touched={}, flash={};
+var S=blank(), storageOK=true, savedAt=null, submitted=false, touched={}, flash={}, sending=false, sendError='', mailedCopy=false, doneName='';
 try{
   var raw=localStorage.getItem(KEY);
   if(raw){var p=JSON.parse(raw);if(p&&typeof p==='object'){S=Object.assign(blank(),p);}}
@@ -453,10 +459,13 @@ function reviewHTML(){
   var fill=pending?'<div style="margin-top:16px"><button class="btn" type="button" data-act="fill-zero-all">Completar con 0 los vacíos de todas las secciones</button></div>':'';
   return '<h3 class="sub" style="margin-top:0">Indicadores calculados</h3>'+stats+
     '<h3 class="sub">Estado por sección</h3><div>'+rows+'</div>'+fill+
-    (iss?'<h3 class="sub">Para revisar</h3>'+iss:'');
+    (iss?'<h3 class="sub">Para revisar</h3>'+iss:'')+'<div class="issue bad" id="sendMsg" role="alert" style="margin-top:16px"'+(sendError?'':' hidden')+'>'+esc(sendError)+'</div>';
 }
 function doneHTML(){
-  return '<section class="card done-card"><span class="chip ok">Registro completo</span><h2 style="font:600 22px/1.2 var(--font-display)">Así se vería la confirmación</h2><p class="lead">'+esc(S.info.hospital||'La institución')+' completó los 4 bloques de datos y las 6 secciones de procedimientos. En la versión final, esta pantalla confirmaría el envío y mostraría la copia que recibe el correo indicado.</p><p class="hint">Esta es una maqueta: no se envió ninguna información.</p><div class="demoact"><button class="btn" type="button" data-act="back-review">Volver a la revisión</button><button class="btn" type="button" data-act="clear">Vaciar y empezar de nuevo</button></div></section>';
+  if(ENDPOINT){
+    return '<section class="card done-card"><span class="chip ok">Registro recibido</span><h2 style="font:600 22px/1.2 var(--font-display)">Gracias por completar el registro</h2><p class="lead">Recibimos los datos de '+esc(doneName||'su institución')+'.'+(mailedCopy?' Le enviamos una copia de sus respuestas al correo indicado.':'')+'</p><div class="demoact"><button class="btn" type="button" data-act="clear">Cargar otro registro</button></div></section>';
+  }
+  return '<section class="card done-card"><span class="chip ok">Registro completo</span><h2 style="font:600 22px/1.2 var(--font-display)">Así se vería la confirmación</h2><p class="lead">'+esc(S.info.hospital||'La institución')+' completó los datos de la institución, del equipo y las 6 secciones de procedimientos. Con el envío conectado, esta pantalla confirmaría la recepción y avisaría del correo con la copia.</p><p class="hint">Esta es una maqueta: no se envió ninguna información.</p><div class="demoact"><button class="btn" type="button" data-act="back-review">Volver a la revisión</button><button class="btn" type="button" data-act="clear">Vaciar y empezar de nuevo</button></div></section>';
 }
 
 /* ---------- render ---------- */
@@ -508,7 +517,7 @@ function updateDraft(){
 function updateBar(){
   $('#prev').disabled=S.step===0;
   var nx=$('#next');
-  if(S.step===LAST){nx.textContent='Enviar registro';nx.disabled=!allDone();}
+  if(S.step===LAST){nx.textContent=sending?'Enviando…':'Enviar registro';nx.disabled=sending||!allDone();}
   else{nx.textContent='Siguiente';nx.disabled=false;}
   updateDraft();
 }
@@ -586,13 +595,65 @@ function sample(){
   return s;
 }
 
+/* ---------- envío ---------- */
+function newId(){
+  if(window.crypto&&crypto.randomUUID)return crypto.randomUUID();
+  return Date.now().toString(36)+Math.random().toString(36).slice(2,10);
+}
+function buildPayload(){
+  var f=[];
+  INST.forEach(function(x){f.push(['Institución · '+x.label,String(S.info[x.k]||'').trim()]);});
+  JEFE.forEach(function(x){f.push(['Jefe de servicio · '+x.label,String(S.info[x.k]||'').trim()]);});
+  f.push(['Staff del servicio',S.staff.filter(function(p){return String(p.n).trim();}).map(function(p){return String(p.n).trim()+' ('+p.r+')';}).join('; ')]);
+  STEPS.forEach(function(st){
+    if(st.kind!=='num')return;
+    st.items.forEach(function(it){f.push([st.short+' · '+it[1],n(it[0])]);});
+    if(st.others){
+      f.push(['Otras · '+st.short,(S.o[st.id]||[]).filter(function(r){return String(r.n).trim()||r.q;}).map(function(r){return (String(r.n).trim()||'Sin nombre')+': '+(parseInt(r.q,10)||0);}).join('; ')]);
+    }
+  });
+  return {token:TOKEN,id:S.sid,copiaA:String(S.info.email||'').trim(),fields:f};
+}
+function showSendErr(msg){
+  sendError=msg||'';
+  var el=$('#sendMsg');
+  if(el){el.textContent=sendError;el.hidden=!sendError;}
+}
+function doSubmit(){
+  if(!ENDPOINT){submitted=true;renderStage();window.scrollTo(0,0);return;}
+  if(sending)return;
+  if(!S.sid){S.sid=newId();}
+  save();
+  sending=true;showSendErr('');updateBar();
+  var ctrl=window.AbortController?new AbortController():null;
+  var timer=setTimeout(function(){if(ctrl)ctrl.abort();},30000);
+  fetch(ENDPOINT,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(buildPayload()),signal:ctrl?ctrl.signal:undefined})
+    .then(function(r){return r.json();})
+    .then(function(res){
+      clearTimeout(timer);
+      if(!res||!res.ok)throw new Error('rechazado');
+      sending=false;
+      doneName=S.info.hospital||'';
+      mailedCopy=!!res.mailed;
+      S=blank();touched={};
+      try{localStorage.removeItem(KEY);}catch(_){}
+      submitted=true;renderStage();window.scrollTo(0,0);
+    })
+    .catch(function(){
+      clearTimeout(timer);
+      sending=false;
+      showSendErr('No pudimos confirmar el envío. Revise su conexión y vuelva a tocar "Enviar registro". Si ya se había enviado, no se duplica.');
+      updateBar();
+    });
+}
+
 /* ---------- eventos ---------- */
 function act(name,el){
   var st=STEPS[S.step];
   if(name==='prev'){go(S.step-1);return;}
   if(name==='next'){
     if(S.step<LAST){go(S.step+1);}
-    else if(allDone()){submitted=true;renderStage();window.scrollTo(0,0);}
+    else if(allDone()){doSubmit();}
     return;
   }
   if(name==='jump'){go(parseInt(el.dataset.i,10));return;}
@@ -603,7 +664,7 @@ function act(name,el){
   if(name==='fill-zero'){st.items.forEach(function(it){if((S.v[it[0]]==null?'':S.v[it[0]])==='')S.v[it[0]]='0';});syncInputs();save();refresh();return;}
   if(name==='fill-zero-all'){STEPS.forEach(function(s){if(s.kind==='num')s.items.forEach(function(it){if((S.v[it[0]]==null?'':S.v[it[0]])==='')S.v[it[0]]='0';});});save();renderStage();return;}
   if(name==='sample'){S=sample();touched={};submitted=false;save();renderStage();return;}
-  if(name==='clear'){S=blank();touched={};flash={};submitted=false;save();renderStage();window.scrollTo(0,0);return;}
+  if(name==='clear'){S=blank();touched={};flash={};sending=false;sendError='';submitted=false;save();renderStage();window.scrollTo(0,0);return;}
   if(name==='back-review'){submitted=false;renderStage();return;}
 }
 document.addEventListener('click',function(e){
